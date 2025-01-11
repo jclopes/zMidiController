@@ -28,13 +28,54 @@
 
 #include <RtMidi.h>
 
-       /* We will use this renderer to draw into this window every frame. */
+// ImGui stuff
+#include "imgui.h"
+#include "imgui_impl_sdl3.h"
+#include "imgui_impl_sdlrenderer3.h"
+
+/* We will use this renderer to draw into this window every frame. */
 static SDL_Window* window = NULL;
 static SDL_Renderer* renderer = NULL;
 static SDL_Joystick* joystick = NULL;
-static SDL_Color colors[64];
 
 static RtMidiOut* midiout = NULL;
+
+void create_ui(RtMidiOut* mout) {
+    bool open = true;
+    static unsigned int selected_port_id = 0;
+    std::string selected_port = mout->getPortName(selected_port_id);
+
+    ImGui::SetNextWindowSize(ImVec2(640, 360));
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    if (ImGui::Begin("UI", &open, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+        ImGui::Text("Midi Config");
+        if (ImGui::BeginCombo("Port", selected_port.c_str(), ImGuiComboFlags_None)) {
+            for (unsigned int i = 0; i < mout->getPortCount(); i++) {
+                const bool is_selected = (selected_port_id == i);
+                const std::string item = mout->getPortName(i);
+                if (ImGui::Selectable(item.c_str(), is_selected)) {
+                    if (i != selected_port_id) {
+                        selected_port_id = i;
+                        // TODO: Maybe trigger a SDL_Event and do the port change somewhere else
+                        mout->closePort();
+                        try {
+                            SDL_Log("RtMidi open port %s", mout->getPortName(selected_port_id).c_str());
+                            mout->openPort(selected_port_id);
+                        }
+                        catch (RtMidiError& error) {
+                            error.printMessage();
+                            // TODO: show the error to user or crash the app.
+                        }
+                    }
+                }
+                if (is_selected)
+                    ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+    }
+    ImGui::End();
+}
 
 /* This function runs once at startup. */
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
@@ -49,17 +90,30 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
         return SDL_APP_FAILURE;
     }
 
-    if (!SDL_CreateWindowAndRenderer("examples/input/joystick-polling", 640, 480, 0, &window, &renderer)) {
+    if (!SDL_CreateWindowAndRenderer("zMIDI Controller", 640, 360, SDL_WINDOW_HIGH_PIXEL_DENSITY, &window, &renderer)) {
         SDL_Log("Couldn't create window/renderer: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
 
-    for (i = 0; i < SDL_arraysize(colors); i++) {
-        colors[i].r = SDL_rand(255);
-        colors[i].g = SDL_rand(255);
-        colors[i].b = SDL_rand(255);
-        colors[i].a = 255;
-    }
+    
+    SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    SDL_ShowWindow(window);
+
+    // Setup ImGui context
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+
+    // Set ImGui Style
+//    ImGui::StyleColorsDark();
+    io.FontAllowUserScaling = true;
+    io.Fonts->AddFontFromFileTTF("RobotoMono.ttf", 24);
+
+    // Setup Renderer backends
+    ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
+    ImGui_ImplSDLRenderer3_Init(renderer);
 
     try {
         midiout = new RtMidiOut();
@@ -68,12 +122,15 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
         error.printMessage();
         return SDL_APP_FAILURE;
     }
+
+    // TODO: move the openning of the midi out port to another function
     unsigned int nPorts = midiout->getPortCount();
     std::cout << "Number of midi ports:" << nPorts << std::endl;
     if (nPorts == 0) {
         std::cout << "No output ports available!" << std::endl;
         return SDL_APP_FAILURE;
     }
+
     try {
         std::cout << "Openning port: " << midiout->getPortName(0) << std::endl;
         midiout->openPort(0);
@@ -107,119 +164,45 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
             joystick = NULL;
         }
     }
+    else if (event->type == SDL_EVENT_JOYSTICK_BUTTON_DOWN) {
+        // TODO: check which button was pressed
+        std::vector<unsigned char> message;
+        message.push_back(0x90);  // key down channel 1
+        message.push_back(64);    // note: C3
+        message.push_back(90);    // velocity 90
+        midiout->sendMessage(&message);
+    }
+    else if (event->type == SDL_EVENT_JOYSTICK_BUTTON_UP) {
+        // TODO: check which button was pressed
+        std::vector<unsigned char> message;
+        message.push_back(0x80);  // key up channel 1
+        message.push_back(64);    // note: C3
+        //message.push_back(90);
+        midiout->sendMessage(&message);
+    }
+
+    ImGui_ImplSDL3_ProcessEvent(event);
+
     return SDL_APP_CONTINUE;  /* carry on with the program! */
 }
 
 /* This function runs once per frame, and is the heart of the program. */
 SDL_AppResult SDL_AppIterate(void* appstate)
 {
-    int winw = 640, winh = 480;
-    const char* text = "Plug in a joystick, please.";
-    float x, y;
-    int i;
+    ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 
-    if (joystick) {  /* we have a stick opened? */
-        text = SDL_GetJoystickName(joystick);
-    }
+    ImGui_ImplSDLRenderer3_NewFrame();
+    ImGui_ImplSDL3_NewFrame();
+    ImGui::NewFrame();
 
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    create_ui(midiout);
+
+    ImGui::Render();
+    SDL_SetRenderDrawColorFloat(renderer, clear_color.x, clear_color.y, clear_color.z, clear_color.w);
     SDL_RenderClear(renderer);
-    SDL_GetWindowSize(window, &winw, &winh);
 
-    /* note that you can get input as events, instead of polling, which is
-       better since it won't miss button presses if the system is lagging,
-       but often times checking the current state per-frame is good enough,
-       and maybe better if you'd rather _drop_ inputs due to lag. */
+    ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
 
-    if (joystick) {  /* we have a stick opened? */
-        const float size = 30.0f;
-        int total;
-
-        /* draw axes as bars going across middle of screen. We don't know if it's an X or Y or whatever axis, so we can't do more than this. */
-        total = SDL_GetNumJoystickAxes(joystick);
-        y = (float)((winh - (total * size)) / 2);
-        x = ((float)winw) / 2.0f;
-        for (i = 0; i < total; i++) {
-            const SDL_Color* color = &colors[i % SDL_arraysize(colors)];
-            const float val = (((float)SDL_GetJoystickAxis(joystick, i)) / 32767.0f);  /* make it -1.0f to 1.0f */
-            const float dx = x + (val * x);
-            const SDL_FRect dst = { dx, y, x - SDL_fabsf(dx), size };
-            SDL_SetRenderDrawColor(renderer, color->r, color->g, color->b, color->a);
-            SDL_RenderFillRect(renderer, &dst);
-            y += size;
-        }
-
-        /* draw buttons as blocks across top of window. We only know the button numbers, but not where they are on the device. */
-        total = SDL_GetNumJoystickButtons(joystick);
-        x = (float)((winw - (total * size)) / 2);
-        for (i = 0; i < total; i++) {
-            const SDL_Color* color = &colors[i % SDL_arraysize(colors)];
-            const SDL_FRect dst = { x, 0.0f, size, size };
-            if (SDL_GetJoystickButton(joystick, i)) {
-                SDL_SetRenderDrawColor(renderer, color->r, color->g, color->b, color->a);
-            }
-            else {
-                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-            }
-            SDL_RenderFillRect(renderer, &dst);
-            SDL_SetRenderDrawColor(renderer, 255, 255, 255, color->a);
-            SDL_RenderRect(renderer, &dst);  /* outline it */
-            x += size;
-        }
-
-        /* draw hats across the bottom of the screen. */
-        total = SDL_GetNumJoystickHats(joystick);
-        x = ((float)((winw - (total * (size * 2.0f))) / 2.0f)) + (size / 2.0f);
-        y = ((float)winh) - size;
-        for (i = 0; i < total; i++) {
-            const SDL_Color* color = &colors[i % SDL_arraysize(colors)];
-            const float thirdsize = size / 3.0f;
-            const SDL_FRect cross[] = { { x, y + thirdsize, size, thirdsize }, { x + thirdsize, y, thirdsize, size } };
-            const Uint8 hat = SDL_GetJoystickHat(joystick, i);
-
-            SDL_SetRenderDrawColor(renderer, 90, 90, 90, 255);
-            SDL_RenderFillRects(renderer, cross, SDL_arraysize(cross));
-
-            SDL_SetRenderDrawColor(renderer, color->r, color->g, color->b, color->a);
-
-            if (hat & SDL_HAT_UP) {
-                const SDL_FRect dst = { x + thirdsize, y, thirdsize, thirdsize };
-                SDL_RenderFillRect(renderer, &dst);
-                std::vector<unsigned char> message;
-                message.push_back(128);
-                message.push_back(64);
-                message.push_back(90);
-                midiout->sendMessage(&message);
-            }
-
-            if (hat & SDL_HAT_RIGHT) {
-                const SDL_FRect dst = { x + (thirdsize * 2), y + thirdsize, thirdsize, thirdsize };
-                SDL_RenderFillRect(renderer, &dst);
-            }
-
-            if (hat & SDL_HAT_DOWN) {
-                const SDL_FRect dst = { x + thirdsize, y + (thirdsize * 2), thirdsize, thirdsize };
-                SDL_RenderFillRect(renderer, &dst);
-                std::vector<unsigned char> message;
-                message.push_back(144);
-                message.push_back(64);
-                message.push_back(90);
-                midiout->sendMessage(&message);
-            }
-
-            if (hat & SDL_HAT_LEFT) {
-                const SDL_FRect dst = { x, y + thirdsize, thirdsize, thirdsize };
-                SDL_RenderFillRect(renderer, &dst);
-            }
-
-            x += size * 2;
-        }
-    }
-
-    x = (((float)winw) - (SDL_strlen(text) * SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE)) / 2.0f;
-    y = (((float)winh) - SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE) / 2.0f;
-    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-    SDL_RenderDebugText(renderer, x, y, text);
     SDL_RenderPresent(renderer);
 
     return SDL_APP_CONTINUE;  /* carry on with the program! */
@@ -232,9 +215,13 @@ void SDL_AppQuit(void* appstate, SDL_AppResult result)
         SDL_CloseJoystick(joystick);
     }
 
+    // Cleanup ImGui stuff
+    ImGui_ImplSDLRenderer3_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
+    ImGui::DestroyContext();
+
     // Cleanup RtMidi stuff
     delete midiout;
-    std::cout << "Cleanup Done!" << std::endl;
 
     /* SDL will clean up the window/renderer for us. */
 }
