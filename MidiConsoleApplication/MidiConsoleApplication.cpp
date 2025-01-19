@@ -19,6 +19,8 @@
     /* SDL can handle multiple joysticks, but for simplicity, this program only
        deals with the first stick it sees. */
 
+#include <string>
+#include <vector>
 #define SDL_MAIN_USE_CALLBACKS 1  /* use the callbacks instead of main() */
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL.h>
@@ -33,49 +35,119 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
 
+enum ButtonFunction {
+    NOTE,
+    CC
+};
+
+struct JoystickStatus {
+    ButtonFunction func = NOTE;
+    int channel = 0;
+    int value = 0;
+};
+
 /* We will use this renderer to draw into this window every frame. */
 static SDL_Window* window = NULL;
 static SDL_Renderer* renderer = NULL;
 static SDL_Joystick* joystick = NULL;
 
-static RtMidiOut* midiout = NULL;
+static RtMidiOut* midi_out = NULL;
 
-void create_ui(RtMidiOut* mout) {
-    bool open = true;
+static std::vector<JoystickStatus> joystick_conf;
+
+const char* button_function_str(ButtonFunction bf) {
+    const char* res;
+    
+    switch (bf) {
+    case ButtonFunction::NOTE:
+        res = "NOTE";
+        break;
+    case ButtonFunction::CC:
+        res = "CC";
+        break;
+    default:
+        res = NULL;
+    }
+    return res;
+}
+
+void joystick_config_ui(SDL_Joystick* joys, std::vector<JoystickStatus>& joy_conf) {
+    // TODO: Create a line for each button.
+    // button_id; message type [note | cc]; [note | code]
+    // Put everything in a table and remove the labels.
+
+    if (joys != NULL) {
+        ImGui::SeparatorText("Controller");
+        ImGui::Text(SDL_GetJoystickName(joys));
+        int button_count = SDL_GetNumJoystickButtons(joys);
+        for (unsigned int btn = 0; btn < button_count; btn++) {
+            ImGui::Text("Button %d ", btn);
+            ImGui::SameLine();
+            ImGui::PushID(btn);
+            if (ImGui::BeginCombo("", button_function_str(joy_conf[btn].func), ImGuiComboFlags_WidthFitPreview|ImGuiComboFlags_None)) {
+                for (unsigned int i = 0; i < 2; i++) {
+                    const bool is_selected = (joy_conf[btn].func == i);
+                    if (ImGui::Selectable(button_function_str((ButtonFunction)i), is_selected)) {
+                        // TODO: ...
+                        joy_conf[btn].func = (ButtonFunction)i;
+                    }
+                    if (is_selected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopID();
+            ImGui::SameLine();
+            ImGui::PushID(btn);
+            if (ImGui::BeginCombo("", std::to_string(joy_conf[btn].channel+1).c_str(), ImGuiComboFlags_WidthFitPreview|ImGuiComboFlags_None)) {
+                for (unsigned int i = 0; i < 16; i++) {
+                    const bool is_selected = (joy_conf[btn].channel == i);
+                    if (ImGui::Selectable(std::to_string(i+1).c_str(), is_selected)) {
+                        joy_conf[btn].channel = i;
+                    }
+                    if (is_selected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopID();
+        }
+    }
+}
+
+
+void midi_config_ui(RtMidiOut* mout) {
     static unsigned int selected_port_id = 0;
     std::string selected_port = mout->getPortName(selected_port_id);
 
-    ImGui::SetNextWindowSize(ImVec2(640, 360));
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    if (ImGui::Begin("UI", &open, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
-        ImGui::Text("Midi Config");
-        if (ImGui::BeginCombo("Port", selected_port.c_str(), ImGuiComboFlags_None)) {
-            for (unsigned int i = 0; i < mout->getPortCount(); i++) {
-                const bool is_selected = (selected_port_id == i);
-                const std::string item = mout->getPortName(i);
-                if (ImGui::Selectable(item.c_str(), is_selected)) {
-                    if (i != selected_port_id) {
-                        selected_port_id = i;
-                        // TODO: Maybe trigger a SDL_Event and do the port change somewhere else
-                        mout->closePort();
-                        try {
-                            SDL_Log("RtMidi open port %s", mout->getPortName(selected_port_id).c_str());
-                            mout->openPort(selected_port_id);
-                        }
-                        catch (RtMidiError& error) {
-                            error.printMessage();
-                            // TODO: show the error to user or crash the app.
-                        }
+    ImGui::SeparatorText("Midi Config");
+    // Port DropDown
+    if (ImGui::BeginCombo("Port", selected_port.c_str(), ImGuiComboFlags_None)) {
+        for (unsigned int i = 0; i < mout->getPortCount(); i++) {
+            const bool is_selected = (selected_port_id == i);
+            const std::string item = mout->getPortName(i);
+            if (ImGui::Selectable(item.c_str(), is_selected)) {
+                if (i != selected_port_id) {
+                    selected_port_id = i;
+                    // TODO: Maybe trigger a SDL_Event and do the port change somewhere else
+                    mout->closePort();
+                    try {
+                        SDL_Log("RtMidi open port %s", mout->getPortName(selected_port_id).c_str());
+                        mout->openPort(selected_port_id);
+                    }
+                    catch (RtMidiError& error) {
+                        error.printMessage();
+                        // TODO: show the error to user or crash the app.
                     }
                 }
-                if (is_selected)
-                    ImGui::SetItemDefaultFocus();
             }
-            ImGui::EndCombo();
+            if (is_selected)
+                ImGui::SetItemDefaultFocus();
         }
+        ImGui::EndCombo();
     }
-    ImGui::End();
 }
+
 
 /* This function runs once at startup. */
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
@@ -90,12 +162,11 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
         return SDL_APP_FAILURE;
     }
 
-    if (!SDL_CreateWindowAndRenderer("zMIDI Controller", 640, 360, SDL_WINDOW_HIGH_PIXEL_DENSITY, &window, &renderer)) {
+    if (!SDL_CreateWindowAndRenderer("zMIDI Controller", 640, 640, SDL_WINDOW_HIGH_PIXEL_DENSITY, &window, &renderer)) {
         SDL_Log("Couldn't create window/renderer: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
 
-    
     SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     SDL_ShowWindow(window);
 
@@ -104,7 +175,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+//    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 
     // Set ImGui Style
 //    ImGui::StyleColorsDark();
@@ -116,7 +187,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     ImGui_ImplSDLRenderer3_Init(renderer);
 
     try {
-        midiout = new RtMidiOut();
+        midi_out = new RtMidiOut();
     }
     catch (RtMidiError& error) {
         error.printMessage();
@@ -124,7 +195,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     }
 
     // TODO: move the openning of the midi out port to another function
-    unsigned int nPorts = midiout->getPortCount();
+    unsigned int nPorts = midi_out->getPortCount();
     std::cout << "Number of midi ports:" << nPorts << std::endl;
     if (nPorts == 0) {
         std::cout << "No output ports available!" << std::endl;
@@ -132,8 +203,8 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     }
 
     try {
-        std::cout << "Openning port: " << midiout->getPortName(0) << std::endl;
-        midiout->openPort(0);
+        std::cout << "Openning port: " << midi_out->getPortName(0) << std::endl;
+        midi_out->openPort(0);
     }
     catch (RtMidiError &error) {
         error.printMessage();
@@ -156,29 +227,35 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
             if (!joystick) {
                 SDL_Log("Failed to open joystick ID %u: %s", (unsigned int)event->jdevice.which, SDL_GetError());
             }
+            int button_count = SDL_GetNumJoystickButtons(joystick);
+            for (int i = 0; i < button_count; i++) {
+                JoystickStatus js;
+                joystick_conf.push_back(js);
+            }
         }
     }
     else if (event->type == SDL_EVENT_JOYSTICK_REMOVED) {
         if (joystick && (SDL_GetJoystickID(joystick) == event->jdevice.which)) {
             SDL_CloseJoystick(joystick);  /* our joystick was unplugged. */
             joystick = NULL;
+            joystick_conf.clear();
         }
     }
     else if (event->type == SDL_EVENT_JOYSTICK_BUTTON_DOWN) {
         // TODO: check which button was pressed
         std::vector<unsigned char> message;
-        message.push_back(0x90);  // key down channel 1
+        message.push_back(0x90);  // note on @ channel 1
         message.push_back(64);    // note: C3
         message.push_back(90);    // velocity 90
-        midiout->sendMessage(&message);
+        midi_out->sendMessage(&message);
     }
     else if (event->type == SDL_EVENT_JOYSTICK_BUTTON_UP) {
         // TODO: check which button was pressed
         std::vector<unsigned char> message;
-        message.push_back(0x80);  // key up channel 1
+        message.push_back(0x80);  // note off @ channel 1
         message.push_back(64);    // note: C3
         //message.push_back(90);
-        midiout->sendMessage(&message);
+        midi_out->sendMessage(&message);
     }
 
     ImGui_ImplSDL3_ProcessEvent(event);
@@ -195,7 +272,13 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
 
-    create_ui(midiout);
+    ImGui::SetNextWindowSize(ImVec2(640, 640));
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    if (ImGui::Begin("UI", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+        midi_config_ui(midi_out);
+        joystick_config_ui(joystick, joystick_conf);
+    }
+    ImGui::End();
 
     ImGui::Render();
     SDL_SetRenderDrawColorFloat(renderer, clear_color.x, clear_color.y, clear_color.z, clear_color.w);
@@ -221,7 +304,7 @@ void SDL_AppQuit(void* appstate, SDL_AppResult result)
     ImGui::DestroyContext();
 
     // Cleanup RtMidi stuff
-    delete midiout;
+    delete midi_out;
 
     /* SDL will clean up the window/renderer for us. */
 }

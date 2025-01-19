@@ -1,0 +1,6 @@
+--driver-mode=cl
+-EHsc
+-IC:/Users/Joao/source/repos/SDL/include
+-IC:/Users/Joao/source/repos/rtmidi
+-IC:/Users/Joao/source/repos/MidiConsoleApplication/imgui
+-IC:/Users/Joao/source/repos/MidiConsoleApplication/imgui/backends
