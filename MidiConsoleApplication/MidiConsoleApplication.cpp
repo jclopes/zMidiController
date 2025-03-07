@@ -42,8 +42,8 @@ enum ButtonFunction {
 
 struct JoystickStatus {
     ButtonFunction func = NOTE;
-    int channel = 0;
-    int value = 0;
+    int channel = 0; // 0 to 15
+    int value = 0;   // 0 to 127
 };
 
 /* We will use this renderer to draw into this window every frame. */
@@ -71,6 +71,29 @@ const char* button_function_str(ButtonFunction bf) {
     return res;
 }
 
+
+const unsigned char button_function_val(ButtonFunction bf, bool release = false) {
+    unsigned char res;
+
+    switch (bf) {
+    case ButtonFunction::NOTE:
+        if (release) {
+            res = 0x80;
+        }
+        else {
+            res = 0x90;
+        }
+        break;
+    case ButtonFunction::CC:
+        res = 0xB0;
+        break;
+    default:
+        res = 0;
+    }
+    return res;
+}
+
+
 void joystick_config_ui(SDL_Joystick* joys, std::vector<JoystickStatus>& joy_conf) {
     // TODO: Create a line for each button.
     // button_id; message type [note | cc]; [note | code]
@@ -80,37 +103,39 @@ void joystick_config_ui(SDL_Joystick* joys, std::vector<JoystickStatus>& joy_con
         ImGui::SeparatorText("Controller");
         ImGui::Text(SDL_GetJoystickName(joys));
         int button_count = SDL_GetNumJoystickButtons(joys);
-        for (unsigned int btn = 0; btn < button_count; btn++) {
-            ImGui::Text("Button %d ", btn);
-            ImGui::SameLine();
-            ImGui::PushID(btn);
-            if (ImGui::BeginCombo("", button_function_str(joy_conf[btn].func), ImGuiComboFlags_WidthFitPreview|ImGuiComboFlags_None)) {
-                for (unsigned int i = 0; i < 2; i++) {
-                    const bool is_selected = (joy_conf[btn].func == i);
-                    if (ImGui::Selectable(button_function_str((ButtonFunction)i), is_selected)) {
-                        // TODO: ...
-                        joy_conf[btn].func = (ButtonFunction)i;
+        if (ImGui::BeginTable(SDL_GetJoystickName(joys), 4)) {
+            ImGui::TableSetupColumn("Bttn");
+            ImGui::TableSetupColumn("Func");
+            ImGui::TableSetupColumn("Chnl");
+            ImGui::TableSetupColumn("Val");
+            ImGui::TableHeadersRow();
+            for (unsigned int btn = 0; btn < button_count; btn++) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", btn);
+                ImGui::TableNextColumn();
+                ImGui::PushID(btn);
+                if (ImGui::BeginCombo("##Func", button_function_str(joy_conf[btn].func), ImGuiComboFlags_None)) {
+                    for (unsigned int i = 0; i < 2; i++) {
+                        const bool is_selected = (joy_conf[btn].func == i);
+                        if (ImGui::Selectable(button_function_str((ButtonFunction)i), is_selected)) {
+                            joy_conf[btn].func = (ButtonFunction)i;
+                        }
+                        if (is_selected)
+                            ImGui::SetItemDefaultFocus();
                     }
-                    if (is_selected)
-                        ImGui::SetItemDefaultFocus();
+                    ImGui::EndCombo();
                 }
-                ImGui::EndCombo();
-            }
-            ImGui::PopID();
-            ImGui::SameLine();
-            ImGui::PushID(btn);
-            if (ImGui::BeginCombo("", std::to_string(joy_conf[btn].channel+1).c_str(), ImGuiComboFlags_WidthFitPreview|ImGuiComboFlags_None)) {
-                for (unsigned int i = 0; i < 16; i++) {
-                    const bool is_selected = (joy_conf[btn].channel == i);
-                    if (ImGui::Selectable(std::to_string(i+1).c_str(), is_selected)) {
-                        joy_conf[btn].channel = i;
-                    }
-                    if (is_selected)
-                        ImGui::SetItemDefaultFocus();
+                ImGui::TableNextColumn();
+                int channel = joy_conf[btn].channel + 1;
+                if (ImGui::SliderInt("##Chnl", &channel, 1, 16)) {
+                    joy_conf[btn].channel = channel - 1;
                 }
-                ImGui::EndCombo();
+                ImGui::TableNextColumn();
+                ImGui::SliderInt("##Val", &joy_conf[btn].value, 0, 127);
+                ImGui::PopID();
             }
-            ImGui::PopID();
+            ImGui::EndTable();
         }
     }
 }
@@ -162,7 +187,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
         return SDL_APP_FAILURE;
     }
 
-    if (!SDL_CreateWindowAndRenderer("zMIDI Controller", 640, 640, SDL_WINDOW_HIGH_PIXEL_DENSITY, &window, &renderer)) {
+    if (!SDL_CreateWindowAndRenderer("zMIDI Controller", 800, 640, SDL_WINDOW_HIGH_PIXEL_DENSITY, &window, &renderer)) {
         SDL_Log("Couldn't create window/renderer: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
@@ -242,18 +267,24 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
         }
     }
     else if (event->type == SDL_EVENT_JOYSTICK_BUTTON_DOWN) {
-        // TODO: check which button was pressed
+        // Get which button was pressed
+        int button_id = event->jbutton.button;
+
         std::vector<unsigned char> message;
-        message.push_back(0x90);  // note on @ channel 1
-        message.push_back(64);    // note: C3
-        message.push_back(90);    // velocity 90
+
+        int type_chn = button_function_val(joystick_conf[button_id].func, false) + joystick_conf[button_id].channel;
+        message.push_back(type_chn);
+        message.push_back(joystick_conf[button_id].value);
+        message.push_back(90);
+        SDL_Log("Sending message %x %d %d", type_chn, joystick_conf[button_id].value, 90);
         midi_out->sendMessage(&message);
     }
     else if (event->type == SDL_EVENT_JOYSTICK_BUTTON_UP) {
-        // TODO: check which button was pressed
+        int button_id = event->jbutton.button;
+        int type_chn = button_function_val(joystick_conf[button_id].func, true) + joystick_conf[button_id].channel;
         std::vector<unsigned char> message;
-        message.push_back(0x80);  // note off @ channel 1
-        message.push_back(64);    // note: C3
+        message.push_back(type_chn);
+        message.push_back(joystick_conf[button_id].value);
         //message.push_back(90);
         midi_out->sendMessage(&message);
     }
@@ -272,7 +303,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
 
-    ImGui::SetNextWindowSize(ImVec2(640, 640));
+    ImGui::SetNextWindowSize(ImVec2(800, 640));
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     if (ImGui::Begin("UI", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
         midi_config_ui(midi_out);
